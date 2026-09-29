@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Review session frames</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px 16px 80px;
+  }
+  h1 { font-size: 18px; margin-bottom: 2px; }
+  .subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
+  .code-form { display: flex; gap: 8px; margin-bottom: 24px; }
+  .code-form input {
+    flex: 1;
+    padding: 8px 10px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+  .code-form button, .save-bar button {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: #18a0fb;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .status { font-size: 13px; color: #666; margin-bottom: 16px; min-height: 18px; }
+  .status.error { color: #e5484d; }
+  .frame-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    margin-bottom: 10px;
+  }
+  .frame-row.excluded { opacity: 0.4; }
+  .frame-row img {
+    width: 120px;
+    height: 68px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: #eee;
+    flex-shrink: 0;
+  }
+  .frame-meta { flex: 1; min-width: 0; }
+  .frame-meta .filename { font-weight: 600; font-size: 13px; }
+  .frame-meta .timestamp { font-size: 12px; color: #888; }
+  .frame-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .frame-actions button {
+    width: 28px;
+    height: 28px;
+    border: 1px solid #ccc;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .save-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(255,255,255,0.95);
+    border-top: 1px solid #e5e5e5;
+    padding: 12px 16px;
+    display: flex;
+    justify-content: center;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1e1e1e; color: #eee; }
+    .frame-row { border-color: #333; }
+    .code-form input, .frame-actions button { background: #2a2a2a; border-color: #444; color: #eee; }
+    .save-bar { background: rgba(30,30,30,0.95); border-color: #333; }
+  }
+</style>
+</head>
+<body>
+  <h1>Review session frames</h1>
+  <div class="subtitle">Toggle frames out, reorder, then save. The Figma plugin only pulls in included frames, in this order.</div>
+
+  <div class="code-form">
+    <input id="code-input" type="text" placeholder="Session code (e.g. from upload response)" />
+    <button id="load-btn">Load</button>
+  </div>
+  <div id="status" class="status"></div>
+  <div id="frames"></div>
+  <div class="save-bar" id="save-bar" style="display: none;">
+    <button id="save-btn">Save changes</button>
+  </div>
+
+<script>
+  const els = {
+    codeInput: document.getElementById('code-input'),
+    loadBtn: document.getElementById('load-btn'),
+    status: document.getElementById('status'),
+    frames: document.getElementById('frames'),
+    saveBar: document.getElementById('save-bar'),
+    saveBtn: document.getElementById('save-btn'),
+  };
+
+  let currentCode = null;
+  let frames = [];
+
+  function setStatus(message, isError) {
+    els.status.textContent = message || '';
+    els.status.className = 'status' + (isError ? ' error' : '');
+  }
+
+  function render() {
+    els.frames.innerHTML = '';
+    frames.forEach((frame, index) => {
+      const row = document.createElement('div');
+      row.className = 'frame-row' + (frame.included ? '' : ' excluded');
+
+      const img = document.createElement('img');
+      img.src = frame.url;
+      img.loading = 'lazy';
+
+      const meta = document.createElement('div');
+      meta.className = 'frame-meta';
+      meta.innerHTML = `<div class="filename">${frame.filename}</div><div class="timestamp">t = ${frame.timestamp}s</div>`;
+
+      const actions = document.createElement('div');
+      actions.className = 'frame-actions';
+
+      const upBtn = document.createElement('button');
+      upBtn.textContent = '↑';
+      upBtn.disabled = index === 0;
+      upBtn.onclick = () => { moveFrame(index, -1); };
+
+      const downBtn = document.createElement('button');
+      downBtn.textContent = '↓';
+      downBtn.disabled = index === frames.length - 1;
+      downBtn.onclick = () => { moveFrame(index, 1); };
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.textContent = frame.included ? 'Exclude' : 'Include';
+      toggleBtn.style.width = 'auto';
+      toggleBtn.style.padding = '0 8px';
+      toggleBtn.onclick = () => { frame.included = !frame.included; render(); };
+
+      actions.append(upBtn, downBtn, toggleBtn);
+      row.append(img, meta, actions);
+      els.frames.appendChild(row);
+    });
+    els.saveBar.style.display = frames.length > 0 ? 'flex' : 'none';
+  }
+
+  function moveFrame(index, delta) {
+    const target = index + delta;
+    if (target < 0 || target >= frames.length) return;
+    [frames[index], frames[target]] = [frames[target], frames[index]];
+    render();
+  }
+
+  async function loadSession(code) {
+    setStatus('Loading...');
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(code)}/frames`);
+      if (!res.ok) {
+        throw new Error(res.status === 404 ? 'Session not found.' : `Error ${res.status}`);
+      }
+      const data = await res.json();
+      currentCode = data.sessionCode;
+      frames = data.frames || [];
+      const statusNote = data.status === 'processing' ? ' (still processing — reload in a bit)' : '';
+      setStatus(`${data.videoName || data.sessionCode} — ${frames.length} frame(s)${statusNote}`);
+      render();
+    } catch (err) {
+      frames = [];
+      render();
+      setStatus(err.message || 'Failed to load session.', true);
+    }
+  }
+
+  async function saveChanges() {
+    if (!currentCode) return;
+    setStatus('Saving...');
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(currentCode)}/frames`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          frames: frames.map(({ filename, timestamp, included }) => ({ filename, timestamp, included })),
+        }),
+      });
+      if (!res.ok) throw new Error(`Save failed (${res.status})`);
+      setStatus('Saved.');
+    } catch (err) {
+      setStatus(err.message || 'Failed to save.', true);
+    }
+  }
+
+  els.loadBtn.addEventListener('click', () => {
+    const code = els.codeInput.value.trim();
+    if (code) loadSession(code);
+  });
+  els.codeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') els.loadBtn.click();
+  });
+  els.saveBtn.addEventListener('click', saveChanges);
+
+  const params = new URLSearchParams(location.search);
+  const codeFromQuery = params.get('code');
+  if (codeFromQuery) {
+    els.codeInput.value = codeFromQuery;
+    loadSession(codeFromQuery);
+  }
+</script>
+</body>
+</html>
