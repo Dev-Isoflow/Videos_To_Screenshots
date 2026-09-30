@@ -5,12 +5,17 @@ Run from the repo root (so `video_processing` resolves) with:
     uvicorn backend.app.main:app --reload --port 8000
 
 Flow:
-    1. POST /api/sessions          — upload a video, kicks off freezedetect
-                                      extraction in a background thread.
-    2. GET  /review?code=XXXXXX    — a plain HTML page to review/reorder/
-                                      exclude the extracted frames.
-    3. GET  /api/sessions/{code}   — the contract the Figma plugin consumes:
-                                      { sessionCode, videoName, frames }.
+    1. POST   /api/sessions          — upload a video, kicks off freezedetect
+                                        extraction in a background thread.
+    2. GET    /review?code=XXXXXX    — optional: a plain HTML page to
+                                        review/reorder/exclude frames.
+    3. GET    /api/sessions/{code}   — the contract the Figma plugin
+                                        consumes: { sessionCode, videoName,
+                                        status, frames }.
+    4. DELETE /api/sessions/{code}   — called by the plugin once every frame
+                                        has been placed on canvas; the
+                                        session's data is disposable at that
+                                        point since it now lives in Figma.
 """
 
 import shutil
@@ -137,6 +142,7 @@ async def get_session(session_code: str, request: Request):
         "sessionCode": data["sessionCode"],
         "videoName": data.get("videoName"),
         "status": data.get("status", "ready"),
+        "error": data.get("error"),
         "frames": frames,
     }
 
@@ -191,3 +197,13 @@ async def update_frames(session_code: str, body: FramesUpdateBody):
 @app.get("/review")
 async def review_page():
     return FileResponse(STATIC_DIR / "review.html")
+
+
+@app.delete("/api/sessions/{session_code}")
+async def delete_session(session_code: str):
+    session_dir = DATA_DIR / session_code
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    shutil.rmtree(session_dir)
+    return {"ok": True}
