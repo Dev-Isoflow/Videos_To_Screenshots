@@ -25,6 +25,7 @@ from pathlib import Path
 from secrets import choice as secret_choice
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -33,11 +34,15 @@ from pydantic import BaseModel
 
 from video_processing import EXTRACTION_OFFSET_SECONDS, extract_frame, parse_freezes, run_freezedetect
 
-from . import storage
+from . import labeling, storage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "backend" / "data"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Explicit path rather than a bare load_dotenv(), so this finds
+# backend/.env regardless of the cwd uvicorn was started from.
+load_dotenv(REPO_ROOT / "backend" / ".env")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="UX Research Screenshot Backend")
@@ -78,7 +83,16 @@ def process_video(session_dir: Path, video_path: Path, crop: int, noise: float, 
             extract_frame(video_path, timestamp, frames_dir / filename)
             frames.append({"filename": filename, "timestamp": round(timestamp, 3), "included": True})
 
-        storage.update_session(session_dir, status="ready", frames=frames)
+        session_update = {"status": "ready", "frames": frames}
+
+        labels = labeling.label_session(frames_dir, frames)
+        if labels:
+            for frame in frames:
+                frame["label"] = labels["labels"].get(frame["filename"])
+            session_update["flowLabel"] = labels["flowLabel"]
+            session_update["flowSummary"] = labels["flowSummary"]
+
+        storage.update_session(session_dir, **session_update)
     except Exception as exc:  # noqa: BLE001 - surface any failure to the client
         storage.update_session(session_dir, status="error", error=str(exc))
 
@@ -133,6 +147,7 @@ async def get_session(session_code: str, request: Request):
             "url": f"{base}/media/{session_code}/frames/{frame['filename']}",
             "timestamp": frame["timestamp"],
             "filename": frame["filename"],
+            "label": frame.get("label"),
         }
         for frame in data.get("frames", [])
         if frame.get("included", True)
@@ -143,6 +158,8 @@ async def get_session(session_code: str, request: Request):
         "videoName": data.get("videoName"),
         "status": data.get("status", "ready"),
         "error": data.get("error"),
+        "flowLabel": data.get("flowLabel"),
+        "flowSummary": data.get("flowSummary"),
         "frames": frames,
     }
 
@@ -167,6 +184,8 @@ async def list_frames(session_code: str, request: Request):
         "sessionCode": data["sessionCode"],
         "videoName": data.get("videoName"),
         "status": data.get("status", "ready"),
+        "flowLabel": data.get("flowLabel"),
+        "flowSummary": data.get("flowSummary"),
         "frames": frames,
     }
 
@@ -175,6 +194,7 @@ class FrameUpdate(BaseModel):
     filename: str
     timestamp: float
     included: bool
+    label: Optional[str] = None
 
 
 class FramesUpdateBody(BaseModel):

@@ -54,6 +54,7 @@
   .frame-meta { flex: 1; min-width: 0; }
   .frame-meta .filename { font-weight: 600; font-size: 13px; }
   .frame-meta .timestamp { font-size: 12px; color: #888; }
+  .frame-meta .label { font-size: 12px; color: #18a0fb; margin-bottom: 2px; }
   .frame-actions { display: flex; gap: 4px; flex-shrink: 0; }
   .frame-actions button {
     width: 28px;
@@ -127,7 +128,8 @@
 
       const meta = document.createElement('div');
       meta.className = 'frame-meta';
-      meta.innerHTML = `<div class="filename">${frame.filename}</div><div class="timestamp">t = ${frame.timestamp}s</div>`;
+      const labelLine = frame.label ? `<div class="label">${frame.label}</div>` : '';
+      meta.innerHTML = `${labelLine}<div class="filename">${frame.filename}</div><div class="timestamp">t = ${frame.timestamp}s</div>`;
 
       const actions = document.createElement('div');
       actions.className = 'frame-actions';
@@ -173,7 +175,8 @@
       currentCode = data.sessionCode;
       frames = data.frames || [];
       const statusNote = data.status === 'processing' ? ' (still processing — reload in a bit)' : '';
-      setStatus(`${data.videoName || data.sessionCode} — ${frames.length} frame(s)${statusNote}`);
+      const flowNote = data.flowLabel ? ` — "${data.flowLabel}"` : '';
+      setStatus(`${data.videoName || data.sessionCode}${flowNote} — ${frames.length} frame(s)${statusNote}`);
       render();
     } catch (err) {
       frames = [];
@@ -190,7 +193,7 @@
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          frames: frames.map(({ filename, timestamp, included }) => ({ filename, timestamp, included })),
+          frames: frames.map(({ filename, timestamp, included, label }) => ({ filename, timestamp, included, label })),
         }),
       });
       if (!res.ok) throw new Error(`Save failed (${res.status})`);

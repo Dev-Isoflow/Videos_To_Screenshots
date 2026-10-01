@@ -17,7 +17,19 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-Requires `ffmpeg` on PATH (same requirement as `grab_states.py`).
+Requires `ffmpeg` on PATH (same requirement as `grab_states.py`), and an
+`ANTHROPIC_API_KEY` for the labeling step (see below) — the server still
+runs fine without one, it just skips labeling.
+
+Put the key in `backend/.env` (gitignored — never commit this file):
+
+```bash
+cp backend/.env.example backend/.env
+# then edit backend/.env and paste your real key in place of sk-ant-...
+```
+
+`backend/app/main.py` loads this file automatically on startup via
+`python-dotenv` — no need to `export` it in your shell each session.
 
 ## Run
 
@@ -62,11 +74,25 @@ curl http://localhost:8000/api/sessions/AB12CD
   "sessionCode": "AB12CD",
   "videoName": "Checkout Flow Walkthrough",
   "status": "ready",
+  "flowLabel": "Checkout flow",
+  "flowSummary": "User reviews their cart, enters payment details, and confirms the order.",
   "frames": [
-    { "url": "http://localhost:8000/media/AB12CD/frames/01.png", "timestamp": 3.2, "filename": "01.png" }
+    { "url": "http://localhost:8000/media/AB12CD/frames/01.png", "timestamp": 3.2, "filename": "01.png", "label": "Cart review" }
   ]
 }
 ```
+
+## Screen/flow labeling
+
+After extraction finishes (still inside the same background thread), the
+backend makes one Claude API call — sending every extracted frame together —
+to label each screen and describe the overall flow (`backend/app/labeling.py`,
+using `claude-sonnet-5`). This is a nice-to-have, not on the critical path:
+if it fails for any reason (no API key, network error, rate limit), the
+session still becomes `"ready"` with its frames, just without `label` /
+`flowLabel` / `flowSummary` populated. Check the server log for
+`[labeling] skipped due to error: ...` if labels aren't showing up and you
+expected them to.
 
 ## Pointing the plugin at this
 
