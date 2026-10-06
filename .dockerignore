@@ -1,0 +1,24 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.DS_Store
+
+# Secrets — these go in via `fly secrets`, never into the image.
+.env
+.env.*
+backend/.env
+backend/.env.*
+
+# Runtime data and test footage.
+backend/data
+*.mov
+*.MOV
+*.mp4
+*.MP4
+
+# Not needed in the image.
+grab_states.py
+README.md
+LICENSE

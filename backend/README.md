@@ -122,11 +122,72 @@ backend/data/<sessionCode>/
   frames/01.png, 02.png, ...  # extracted frames
 ```
 
+## Deploying to Fly.io
+
+The repo root has a `Dockerfile`, `.dockerignore` and `fly.toml`. Nothing here
+has been deployed yet, and the image hasn't been built locally (no Docker on
+the dev machine), so expect to fix small things on the first build.
+
+You do these steps yourself (account and billing are yours):
+
+```bash
+brew install flyctl
+fly auth login
+
+# 1. Pick a unique app name: edit `app = ...` in fly.toml, then
+fly apps create <your-app-name>
+
+# 2. A volume for sessions (same region as primary_region in fly.toml;
+#    check regions with `fly platform regions`)
+fly volumes create session_data --size 3 --region jnb
+
+# 3. Secrets. The token is what stops strangers uploading videos and
+#    spending your Anthropic credit — keep a copy, the plugin needs it.
+export API_TOKEN=$(openssl rand -hex 24) && echo "$API_TOKEN"
+fly secrets set ANTHROPIC_API_KEY=sk-ant-... API_TOKEN="$API_TOKEN"
+
+# 4. Deploy exactly one machine (see below for why)
+fly deploy --ha=false
+
+curl https://<your-app-name>.fly.dev/healthz     # {"ok":true}
+```
+
+Things that behave differently once it's on a server:
+
+- **Auth.** When `API_TOKEN` is set, every `/api/*` and `/media/*` request
+  needs `Authorization: Bearer <token>`; `/healthz` stays open. Locally, with
+  no `API_TOKEN`, nothing changes. The `/review` page can't send the header,
+  so treat it as local-debug only.
+- **One machine only.** Sessions are JSON files on that machine's volume and
+  processing runs in threads, so a second machine would have its own separate
+  set of sessions. `--ha=false` matters on the first deploy; keep it at one
+  with `fly scale count 1`.
+- **Restarts and deploys** kill in-flight processing. On startup the server
+  marks any session still `processing` as `error` ("please upload it again")
+  rather than leaving the plugin polling forever.
+- **Cleanup.** A background sweep deletes sessions untouched for
+  `SESSION_TTL_HOURS` (24 by default; 0 disables), so abandoned uploads don't
+  fill the volume. Sessions are still deleted immediately after placement.
+- **Auto-stop.** The machine stops when idle and starts on the next request,
+  so the first request after a quiet spell is slow. If you close the plugin
+  mid-processing it can stop before finishing; that session is then marked
+  `error` on next start.
+- **Machine size.** `shared-cpu-2x` with 2 GB in `fly.toml`. freezedetect
+  decodes the whole video, so a longer recording means a longer wait rather
+  than more memory; bump the CPU if it feels slow.
+
+Still to do on the plugin side before it can talk to a deployed server
+(none of this is in the plugin repo yet): point `BACKEND_BASE_URL` at the
+`https://<app>.fly.dev` URL, replace the `"*"` entry in the manifest's
+`allowedDomains` with that host, send the bearer token on every request, and
+load frame thumbnails through `fetch` instead of `<img src>` (an `<img>`
+can't send the header). The "Codes only work on the machine that did the
+upload" error copy also stops being true once the server is shared.
+
 ## Known v0 limitations (by design)
 
-- Single always-on local process, no auth — fine for one machine, not for
-  exposing over the internet as-is.
-- No queue/retry: if the process is killed mid-extraction, the session is
-  left with `status: "error"` or stuck at `"processing"` — just re-upload.
-- No deletion/cleanup endpoint yet — old sessions just accumulate in
-  `backend/data/` until you delete them by hand.
+- No per-user accounts: one shared bearer token for the whole team, and a
+  session code is a 6-character code, not a secret. Fine for an internal
+  tool, not for anything public-facing.
+- No queue/retry: a restart mid-extraction fails that session; re-upload.
+- No cap on upload size beyond the volume itself.

@@ -1,0 +1,34 @@
+# App names are global on Fly — change this before `fly apps create`.
+app = "videos-to-screens"
+# Check availability with `fly platform regions`. The volume below is tied to
+# this region.
+primary_region = "jnb"
+
+[build]
+
+[env]
+  DATA_DIR = "/data"
+  SESSION_TTL_HOURS = "24"
+
+# Sessions (uploaded video, extracted frames, session.json) live here.
+[mounts]
+  source = "session_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

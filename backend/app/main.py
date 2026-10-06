@@ -18,9 +18,14 @@ Flow:
                                         point since it now lives in Figma.
 """
 
+import os
+import re
+import secrets
 import shutil
 import string
 import threading
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import choice as secret_choice
 from typing import Optional
@@ -28,7 +33,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -37,25 +42,111 @@ from video_processing import EXTRACTION_OFFSET_SECONDS, extract_frame, parse_fre
 from . import labeling, storage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "backend" / "data"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Explicit path rather than a bare load_dotenv(), so this finds
 # backend/.env regardless of the cwd uvicorn was started from.
 load_dotenv(REPO_ROOT / "backend" / ".env")
+
+# Where sessions live. Locally that's backend/data; on Fly it's the mounted
+# volume (DATA_DIR=/data).
+DATA_DIR = Path(os.environ.get("DATA_DIR") or REPO_ROOT / "backend" / "data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="UX Research Screenshot Backend")
+# Optional shared secret. When set (always, on a deployed server), every
+# /api and /media request must send `Authorization: Bearer <token>`. Unset
+# locally so dev needs no configuration.
+API_TOKEN = os.environ.get("API_TOKEN") or None
 
-# Wide open for local dev: the plugin's UI iframe and the review page both
-# need to fetch this API cross-origin. Tighten this before deploying anywhere
-# that isn't your own machine.
+# Sessions older than this are deleted by a background sweep, so abandoned
+# uploads don't fill the volume. 0 disables the sweep.
+SESSION_TTL_HOURS = float(os.environ.get("SESSION_TTL_HOURS") or 24)
+SWEEP_INTERVAL_SECONDS = 30 * 60
+
+# Session codes are generated as six uppercase letters/digits. Anything else
+# is rejected before it gets near a filesystem path (a code like ".." would
+# otherwise resolve to the parent of DATA_DIR).
+SESSION_CODE_RE = re.compile(r"^[A-Z0-9]{6}$")
+
+
+def session_dir_for(session_code: str) -> Path:
+    if not SESSION_CODE_RE.fullmatch(session_code):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return DATA_DIR / session_code
+
+
+def recover_interrupted_sessions() -> None:
+    """Processing runs in daemon threads, so a restart or deploy kills them
+    silently. Mark those sessions as failed rather than leaving the plugin
+    polling a session that will never finish."""
+    for session_dir in DATA_DIR.iterdir():
+        data = storage.read_session(session_dir) if session_dir.is_dir() else None
+        if data and data.get("status") == "processing":
+            storage.update_session(
+                session_dir,
+                status="error",
+                error="The server restarted while this video was processing. Please upload it again.",
+            )
+
+
+def sweep_expired_sessions() -> None:
+    cutoff = time.time() - SESSION_TTL_HOURS * 3600
+    for session_dir in DATA_DIR.iterdir():
+        if not session_dir.is_dir():
+            continue
+        marker = session_dir / storage.SESSION_FILE
+        last_touched = marker.stat().st_mtime if marker.exists() else session_dir.stat().st_mtime
+        if last_touched < cutoff:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+
+def _sweep_loop() -> None:
+    while True:
+        time.sleep(SWEEP_INTERVAL_SECONDS)
+        try:
+            sweep_expired_sessions()
+        except Exception as exc:  # noqa: BLE001 - never let the sweeper die
+            print(f"[sweep] failed: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    recover_interrupted_sessions()
+    if SESSION_TTL_HOURS > 0:
+        sweep_expired_sessions()
+        threading.Thread(target=_sweep_loop, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="UX Research Screenshot Backend", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    protected = request.url.path.startswith(("/api/", "/media/"))
+    if API_TOKEN and protected and request.method != "OPTIONS":
+        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not secrets.compare_digest(supplied, API_TOKEN):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+# Added after the auth middleware so it wraps it: even a 401 then carries CORS
+# headers, which the browser needs to show the plugin a real error instead of
+# an opaque network failure. Wide open on purpose — the plugin's UI iframe has
+# a null origin, and auth is a bearer token rather than cookies.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
 
 app.mount("/media", StaticFiles(directory=DATA_DIR), name="media")
 
@@ -136,7 +227,7 @@ async def create_session(
 
 @app.get("/api/sessions/{session_code}")
 async def get_session(session_code: str, request: Request):
-    session_dir = DATA_DIR / session_code
+    session_dir = session_dir_for(session_code)
     data = storage.read_session(session_dir)
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -166,7 +257,7 @@ async def get_session(session_code: str, request: Request):
 
 @app.get("/api/sessions/{session_code}/frames")
 async def list_frames(session_code: str, request: Request):
-    session_dir = DATA_DIR / session_code
+    session_dir = session_dir_for(session_code)
     data = storage.read_session(session_dir)
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -203,7 +294,7 @@ class FramesUpdateBody(BaseModel):
 
 @app.patch("/api/sessions/{session_code}/frames")
 async def update_frames(session_code: str, body: FramesUpdateBody):
-    session_dir = DATA_DIR / session_code
+    session_dir = session_dir_for(session_code)
     data = storage.read_session(session_dir)
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -221,7 +312,7 @@ async def review_page():
 
 @app.delete("/api/sessions/{session_code}")
 async def delete_session(session_code: str):
-    session_dir = DATA_DIR / session_code
+    session_dir = session_dir_for(session_code)
     if not session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
