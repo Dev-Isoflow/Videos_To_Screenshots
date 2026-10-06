@@ -94,6 +94,28 @@ session still becomes `"ready"` with its frames, just without `label` /
 `[labeling] skipped due to error: ...` if labels aren't showing up and you
 expected them to.
 
+## Suggested groups
+
+The same Claude request that labels each screen also splits the screens into
+groups (e.g. "Search", "Cart"), one per stage of the flow. `GET
+/api/sessions/{code}` returns them as `groups`, in flow order:
+
+```json
+"groups": [
+  { "name": "Search", "method": "ai", "filenames": ["01.png", "02.png"] },
+  { "name": "Cart",   "method": "ai", "filenames": ["03.png"] }
+]
+```
+
+The model's answer is tidied in `backend/app/grouping.py` before it's stored:
+screens it invented or listed twice are dropped, groups are put in flow order,
+and any screen it forgot lands in "Other screens". Frames excluded in review
+disappear from their group. When labeling doesn't run (no API key, no credit),
+`groups` is empty and the plugin shows one "All screens" group.
+
+Not implemented: a free fallback that groups without AI (OCR text changes,
+repeated "home" screens, long pauses). It would need Tesseract in the image.
+
 ## Pointing the plugin at this
 
 In the plugin repo:

@@ -29,10 +29,16 @@ class FrameLabel(BaseModel):
     label: str
 
 
+class FrameGroup(BaseModel):
+    name: str
+    filenames: List[str]
+
+
 class SessionLabels(BaseModel):
     flow_label: str
     flow_summary: str
     frames: List[FrameLabel]
+    groups: List[FrameGroup]
 
 
 def _downscale(src: Path, dest: Path) -> None:
@@ -50,11 +56,13 @@ def _encode_image(path: Path) -> str:
 
 
 def label_session(frames_dir: Path, frames: List[dict]) -> Optional[dict]:
-    """Labels every frame plus the overall flow in a single request (so
-    Claude can label consistently across screens rather than in isolation).
+    """Labels every frame, names the overall flow, and splits the screens into
+    groups, all in a single request (so Claude can label and group consistently
+    across screens rather than in isolation).
 
-    Returns {"flowLabel": str, "flowSummary": str, "labels": {filename: label}}
-    on success, or None if labeling failed for any reason.
+    Returns {"flowLabel": str, "flowSummary": str, "labels": {filename: label},
+    "groups": [FrameGroup, ...]} on success, or None if the request failed for
+    any reason. The groups are raw model output; see grouping.normalise_groups.
     """
     if not frames:
         return None
@@ -71,7 +79,14 @@ def label_session(frames_dir: Path, frames: List[dict]) -> Optional[dict]:
                     "each screenshot, give a short (2-5 word) label describing "
                     "what screen or state it shows. Then give a short label for "
                     "the overall flow, and a one-sentence summary of what the "
-                    "user is doing across these screens."
+                    "user is doing across these screens. Finally, split the "
+                    "screenshots into groups, one per stage of the flow (for "
+                    "example Onboarding, Browsing, Cart, Checkout). Keep the "
+                    "groups in flow order, put every screenshot in exactly one "
+                    "group, refer to screenshots by their filename, and give "
+                    "each group a short (1-3 word) name. Use as few groups as "
+                    "make sense; one group is fine if the flow is a single "
+                    "stage."
                 ),
             }
         ]
@@ -110,6 +125,7 @@ def label_session(frames_dir: Path, frames: List[dict]) -> Optional[dict]:
             "flowLabel": result.flow_label,
             "flowSummary": result.flow_summary,
             "labels": {frame.filename: frame.label for frame in result.frames},
+            "groups": result.groups,
         }
     except Exception as exc:  # noqa: BLE001 - best-effort step, never blocks extraction
         print(f"[labeling] skipped due to error: {exc}")

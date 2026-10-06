@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 from video_processing import EXTRACTION_OFFSET_SECONDS, extract_frame, parse_freezes, run_freezedetect
 
-from . import labeling, storage
+from . import grouping, labeling, storage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -182,6 +182,9 @@ def process_video(session_dir: Path, video_path: Path, crop: int, noise: float, 
                 frame["label"] = labels["labels"].get(frame["filename"])
             session_update["flowLabel"] = labels["flowLabel"]
             session_update["flowSummary"] = labels["flowSummary"]
+            session_update["groups"] = grouping.normalise_groups(
+                labels["groups"], [frame["filename"] for frame in frames]
+            )
 
         storage.update_session(session_dir, **session_update)
     except Exception as exc:  # noqa: BLE001 - surface any failure to the client
@@ -243,6 +246,7 @@ async def get_session(session_code: str, request: Request):
         for frame in data.get("frames", [])
         if frame.get("included", True)
     ]
+    included = {frame["filename"] for frame in frames}
 
     return {
         "sessionCode": data["sessionCode"],
@@ -252,6 +256,8 @@ async def get_session(session_code: str, request: Request):
         "flowLabel": data.get("flowLabel"),
         "flowSummary": data.get("flowSummary"),
         "frames": frames,
+        # Suggested groups, in flow order. Empty when labeling didn't run.
+        "groups": grouping.restrict_to(data.get("groups", []), included),
     }
 
 
