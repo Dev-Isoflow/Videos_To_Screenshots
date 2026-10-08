@@ -60,10 +60,12 @@ INSTRUCTIONS = (
     "These are screenshots from a UX research screen recording, in flow order "
     "(the order the user experienced them). For each screenshot, give a short "
     "(2-5 word) label describing what screen or state it shows. Then split the "
-    "screenshots into groups, one per part of the flow (for example "
-    "\"Onboarding\", \"Browse products\", \"Checkout\"). Groups must follow flow "
-    "order, each screenshot belongs to exactly one group, and each group gets a "
-    "short (1-3 word) name. Loading states of the same screen belong together."
+    "screenshots into groups, one per stage of the flow (for example "
+    "Onboarding, Browsing, Cart, Checkout). Keep the groups in flow order, put "
+    "every screenshot in exactly one group, refer to screenshots by their "
+    "filename, and give each group a short (1-3 word) name. Use as few groups "
+    "as make sense; one group is fine if the flow is a single stage. Loading "
+    "states of the same screen belong together."
 )
 
 
@@ -163,7 +165,8 @@ def label_session(
 
     Returns {"flowLabel": str, "flowSummary": str, "labels": {filename: label},
     "groups": [{name, filenames}]} on success, or None if labeling failed for
-    any reason (in which case no partial labels are used).
+    any reason (in which case no partial labels are used). The groups are raw
+    model output; see grouping.normalise_groups.
     """
     if not frames:
         return None

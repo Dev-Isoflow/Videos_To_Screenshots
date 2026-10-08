@@ -1,25 +1,30 @@
-"""Splits a session's frames into suggested groups ("Onboarding", "Checkout"...).
+"""Suggested groups for a session's screens (e.g. "Onboarding", "Cart").
 
-The main method is AI grouping, which happens inside labeling.py as part of
-the same Claude call that labels each screen. This module holds:
+Two ways to get them:
 
-  - normalize_ai_groups(): tidies up whatever groups the AI returned so every
-    frame lands in exactly one group, in flow order.
-  - group_by_rules(): the free fallback used when AI isn't available. It
-    combines three rules and starts a new group wherever any of them fires:
+  - AI (the main method): the groups come from the same Claude request that
+    labels each screen (see labeling.py). normalise_groups() tidies the answer,
+    because the model can be sloppy: it may invent filenames, list a screen
+    twice, skip one, or return groups out of order. The plugin expects every
+    screen in at most one group and the groups in flow order, so that's
+    enforced here rather than trusted.
+
+  - Free rules (the fallback when AI isn't available: no key, no credit, an
+    error). group_by_rules() starts a new group wherever any of these fire:
       1. Screen text  — the words on screen change topic (OCR via Tesseract).
       3. Home base    — a hub screen (e.g. the app's home tab) reappears.
       5. Pauses       — the screen stayed still for a long time.
+    (The numbers match the options in the original design notes.) Every rule
+    is best-effort: if one fails (e.g. Tesseract isn't installed) the others
+    still run.
 
-Groups are always suggestions; the Figma plugin lets the person accept,
-rename or move them. Every rule is best-effort: if one fails (e.g. Tesseract
-isn't installed) the others still run.
+Groups are always suggestions; the Figma plugin lets the person adjust them.
 """
 
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Iterable, List, Optional, Set
 
 # --- Tuning knobs -----------------------------------------------------------
 
@@ -50,33 +55,55 @@ STOPWORDS = {
 
 # --- AI groups ---------------------------------------------------------------
 
-def normalize_ai_groups(ai_groups: List[dict], frames: List[dict]) -> List[dict]:
-    """Makes the AI's groups safe to use: drops unknown or repeated frames,
-    keeps flow order, and attaches any frame the AI forgot to its neighbour's
-    group."""
-    order = [frame["filename"] for frame in frames]
-    owner: Dict[str, int] = {}
-    names: List[str] = []
-    for group in ai_groups:
-        index = len(names)
-        names.append((group.get("name") or "").strip() or f"Group {index + 1}")
-        for filename in group.get("filenames", []):
-            if filename in order and filename not in owner:
-                owner[filename] = index
+# Used for screens the model didn't assign to any group.
+LEFTOVER_NAME = "Other screens"
+ALL_NAME = "All screens"
 
-    # A forgotten frame joins whichever group the previous frame is in.
-    previous = 0
-    for filename in order:
-        if filename in owner:
-            previous = owner[filename]
-        else:
-            owner[filename] = previous
 
-    groups = [
-        {"name": name, "method": "ai", "filenames": [f for f in order if owner[f] == i]}
-        for i, name in enumerate(names)
-    ]
-    return [g for g in groups if g["filenames"]]
+def normalise_groups(suggested: Iterable, filenames: List[str], method: str = "ai") -> List[dict]:
+    """Returns [{"name", "method", "filenames"}] covering every filename once.
+
+    `suggested` is any iterable of groups, as objects with `.name` and `.filenames`
+    or as dicts with "name" and "filenames".
+    `filenames` is every extracted frame, in flow order.
+    """
+    position = {name: i for i, name in enumerate(filenames)}
+    claimed: set = set()
+    groups: List[dict] = []
+
+    for group in suggested:
+        group_name = group["name"] if isinstance(group, dict) else group.name
+        group_files = group["filenames"] if isinstance(group, dict) else group.filenames
+        members = []
+        for filename in group_files:
+            if filename in position and filename not in claimed:
+                claimed.add(filename)
+                members.append(filename)
+        if not members:
+            continue
+        members.sort(key=position.__getitem__)
+        groups.append({"name": group_name.strip() or "Untitled group", "method": method, "filenames": members})
+
+    # Groups follow the flow, whatever order the model listed them in.
+    groups.sort(key=lambda g: position[g["filenames"][0]])
+
+    leftovers = [name for name in filenames if name not in claimed]
+    if leftovers:
+        name = LEFTOVER_NAME if groups else ALL_NAME
+        groups.append({"name": name, "method": method, "filenames": leftovers})
+
+    return groups
+
+
+def restrict_to(groups: List[dict], keep: set) -> List[dict]:
+    """Drops screens that aren't in `keep` (e.g. frames excluded during review)
+    and any group that ends up empty."""
+    result = []
+    for group in groups:
+        names = [name for name in group["filenames"] if name in keep]
+        if names:
+            result.append({**group, "filenames": names})
+    return result
 
 
 # --- Free rules -------------------------------------------------------------
