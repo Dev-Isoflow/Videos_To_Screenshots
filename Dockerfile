@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
-# freezedetect and frame extraction shell out to ffmpeg.
+# freezedetect and frame extraction shell out to ffmpeg. The free grouping rules
+# (used when AI isn't available) read screen text with tesseract, and use the
+# system word list (wamerican) to ignore OCR garble.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg tesseract-ocr wamerican \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

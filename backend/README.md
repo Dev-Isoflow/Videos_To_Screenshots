@@ -19,7 +19,9 @@ pip install -r backend/requirements.txt
 
 Requires `ffmpeg` on PATH (same requirement as `grab_states.py`), and an
 `ANTHROPIC_API_KEY` for the labeling step (see below) — the server still
-runs fine without one, it just skips labeling.
+runs fine without one, it just skips labeling. The free grouping rules used
+when labeling doesn't run also need `tesseract` (on a Mac: `brew install ffmpeg
+tesseract`); without it they still group by pauses and repeated screens.
 
 Put the key in `backend/.env` (gitignored — never commit this file):
 
@@ -85,9 +87,13 @@ curl http://localhost:8000/api/sessions/AB12CD
 ## Screen/flow labeling
 
 After extraction finishes (still inside the same background thread), the
-backend makes one Claude API call — sending every extracted frame together —
-to label each screen and describe the overall flow (`backend/app/labeling.py`,
-using `claude-sonnet-5`). This is a nice-to-have, not on the critical path:
+backend sends the frames to Claude to label each screen and describe the
+overall flow (`backend/app/labeling.py`, using `claude-sonnet-5`). Frames go
+in batches of up to 40 (the API takes at most 100 images per request), as
+compressed JPEGs no larger than 1024 px. Each batch is told the group names
+used so far and where the previous batch ended, so a stage of the flow that
+spans two batches comes back as one group; a final text-only request writes
+the flow label and summary. If any batch fails, no partial labels are used. This is a nice-to-have, not on the critical path:
 if it fails for any reason (no API key, network error, rate limit), the
 session still becomes `"ready"` with its frames, just without `label` /
 `flowLabel` / `flowSummary` populated. Check the server log for
@@ -110,11 +116,53 @@ groups (e.g. "Search", "Cart"), one per stage of the flow. `GET
 The model's answer is tidied in `backend/app/grouping.py` before it's stored:
 screens it invented or listed twice are dropped, groups are put in flow order,
 and any screen it forgot lands in "Other screens". Frames excluded in review
-disappear from their group. When labeling doesn't run (no API key, no credit),
-`groups` is empty and the plugin shows one "All screens" group.
+disappear from their group.
 
-Not implemented: a free fallback that groups without AI (OCR text changes,
-repeated "home" screens, long pauses). It would need Tesseract in the image.
+When labeling doesn't run (no API key, no credit, an error), free rules group
+the screens instead (`method: "rules"`), starting a new group wherever:
+
+1. **Screen text** changes topic (OCR via Tesseract; words on most screens,
+   like a logo or menu bar, are ignored, as is OCR garble not in the system
+   word list),
+2. a **"home base"** screen reappears (e.g. the app's home tab), or
+3. the screen stayed still for a long **pause**.
+
+Rule groups are named after the words that stand out in them. The thresholds
+are at the top of `grouping.py`.
+
+## Before labeling: duplicates and scrolled pages
+
+- **Duplicates** (`duplicates.py`): a frame that repeats the screen just
+  before it (under 0.8% of the picture differs, ignoring the status bar) is
+  hidden: `"included": false, "duplicateOf": "<filename>"`. The response
+  reports `duplicatesRemoved`.
+- **Scrolled pages** (`scrolling.py`): the video is followed at low
+  resolution, step by step, to tell scrolling apart from other changes. When
+  nothing but scrolling happened between neighbouring frames, they're stitched
+  into one full-page PNG (`<first>-full.png`, using in-between video frames if
+  the person scrolled more than a screen between pauses). The first frame keeps
+  its filename (it's what labeling and OCR look at); in the response its `url`
+  points at the stitched image, with `"fullPage": true` and `viewportHeight`
+  (the height of one ordinary screen). The other frames are hidden with
+  `"mergedInto": "<filename>"`.
+
+## Long recordings
+
+Recordings over 5 minutes are split into parts of at most 5 minutes
+(`parts.py`), cutting after the longest pause near each even split. Each part
+is labeled and grouped on its own; the response lists `parts` (`number`,
+`start`, `end`) and every group has a `part`. Recordings over 30 minutes are
+refused with an error.
+
+## Progress
+
+While a session is `processing`, the response includes `progress`:
+`{"stage", "done", "total", "part", "parts"}`, where `stage` is `scanning`
+(fraction of the video), `extracting` (frame N of M), `tracking` (fraction),
+`stitching` (page N of M), `labeling` (batch N of M) or `grouping`. The scan
+looks at a 10 fps, 1280 px-wide copy of the video, and frames are extracted by
+seeking before decoding, so a 6-minute 4K recording processes in a few
+minutes.
 
 ## Pointing the plugin at this
 
